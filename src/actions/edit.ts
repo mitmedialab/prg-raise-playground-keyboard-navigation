@@ -5,7 +5,7 @@
  */
 
 import {ContextMenuRegistry, LineCursor} from 'blockly';
-import {Navigation} from 'src/navigation';
+import {Navigation} from '../navigation';
 
 /**
  * Action to edit a block.  This just moves the cursor to the first

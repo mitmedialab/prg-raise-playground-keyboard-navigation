@@ -242,6 +242,12 @@ export class Navigation {
     const flyoutWorkspace = Blockly.Workspace.getById(
       e.workspaceId,
     ) as Blockly.WorkspaceSvg;
+    
+    // Add this null check
+    if (!flyoutWorkspace) {
+      return;
+    }
+    
     const mainWorkspace = flyoutWorkspace.targetWorkspace;
     if (!mainWorkspace) {
       return;

@@ -5,17 +5,23 @@
  */
 
 import * as Blockly from 'blockly/core';
-import {NavigationController} from './navigation_controller';
-import {getFlyoutElement, getToolboxElement} from './workspace_utilities';
+import { NavigationController } from './navigation_controller';
+import { getFlyoutElement, getToolboxElement } from './workspace_utilities';
+import { GlobalShortcuts } from './global_shortcuts';
+import { AutoCleanup } from './auto_cleanup';
+
+
 
 /** Options object for KeyboardNavigation instances. */
 export interface NavigationOptions {
   cursor: Partial<Blockly.CursorOptions>;
+  autoCleanup?: boolean;
 }
 
 /** Default options for LineCursor instances. */
 const defaultOptions: NavigationOptions = {
   cursor: {},
+  autoCleanup: true,
 };
 
 /** Plugin for keyboard navigation. */
@@ -49,6 +55,13 @@ export class KeyboardNavigation {
 
   /** Cursor for the main workspace. */
   private cursor: Blockly.LineCursor;
+
+  /** Global shortcuts handler. */
+  private globalShortcuts: GlobalShortcuts;
+
+  /** Auto cleanup instance for organizing blocks automatically. */
+  private autoCleanup?: AutoCleanup;
+
 
   /**
    * These fields are used to preserve the workspace's initial state to restore
@@ -92,6 +105,18 @@ export class KeyboardNavigation {
     this.setGlowTheme();
 
     this.cursor = new Blockly.LineCursor(workspace, options.cursor);
+
+    // Initialize global shortcuts
+    this.globalShortcuts = new GlobalShortcuts(
+      workspace,
+      this.navigationController
+    );
+    this.globalShortcuts.install();
+
+    // Initialize auto cleanup if enabled
+    if (options.autoCleanup !== false) {
+      this.autoCleanup = new AutoCleanup(workspace);
+    }
 
     // Ensure that only the root SVG G (group) has a tab index.
     this.injectionDivTabIndex = workspace
@@ -224,6 +249,13 @@ export class KeyboardNavigation {
    * Disables keyboard navigation for this navigator's workspace.
    */
   dispose() {
+    this.globalShortcuts.uninstall();
+
+    // Dispose auto cleanup
+    if (this.autoCleanup) {
+      this.autoCleanup.dispose();
+    }
+
     // Revert markFocused monkey patch.
     this.workspace.markFocused = this.oldMarkFocused;
     if (this.oldFlyoutMarkFocused) {

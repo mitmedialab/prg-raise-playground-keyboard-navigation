@@ -20,8 +20,11 @@ import toolboxCategories from './toolboxCategories.js';
 
 import {javascriptGenerator} from 'blockly/javascript';
 // @ts-expect-error No types in js file
-import {load} from './loadTestBlocks';
-import {runCode, registerRunCodeShortcut} from './runCode';
+import { load } from './loadTestBlocks';
+import { runCode, registerRunCodeShortcut } from './runCode';
+import { ScreenReader } from './screen_reader';
+
+import { SettingsDialog } from './settings_dialog';
 
 /**
  * Parse query params for inject and navigation options and update
@@ -33,7 +36,7 @@ function getOptions() {
   const params = new URLSearchParams(window.location.search);
 
   const scenarioParam = params.get('scenario');
-  const scenario = scenarioParam ?? 'simpleCircle';
+  const scenario = scenarioParam ?? 'blank';
 
   const rendererParam = params.get('renderer');
   let renderer = 'zelos';
@@ -96,13 +99,21 @@ function createWorkspace(): Blockly.WorkspaceSvg {
   const workspace = Blockly.inject(blocklyDiv, injectOptions);
 
   const navigationOptions = {
-    cursor: {stackConnections},
+    cursor: { stackConnections },
+    autoCleanup: true, // Enable auto cleanup
   };
   new KeyboardNavigation(workspace, navigationOptions);
   registerRunCodeShortcut();
 
-  // Disable blocks that aren't inside the setup or draw loops.
-  workspace.addChangeListener(Blockly.Events.disableOrphans);
+  // Initialize screen reader
+  const screenReader = new ScreenReader(workspace);  // Store reference
+
+  // Initialize settings dialog and register shortcut
+  const settingsDialog = new SettingsDialog(screenReader);
+  settingsDialog.install();
+
+  // Expose globally for global shortcuts access
+  (window as any).settingsDialog = settingsDialog;
 
   load(workspace, scenario);
   runCode();

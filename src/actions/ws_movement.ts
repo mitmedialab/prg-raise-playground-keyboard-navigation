@@ -7,7 +7,7 @@
 import {ASTNode, ShortcutRegistry, utils as BlocklyUtils} from 'blockly';
 import * as Constants from '../constants';
 import type {WorkspaceSvg} from 'blockly';
-import {Navigation} from 'src/navigation';
+import {Navigation} from '../navigation';
 
 const KeyCodes = BlocklyUtils.KeyCodes;
 const createSerializedKey = ShortcutRegistry.registry.createSerializedKey.bind(

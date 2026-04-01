@@ -30,7 +30,7 @@ export class MoveActions {
       name: 'Start move',
       preconditionFn: (workspace) => this.mover.canMove(workspace),
       callback: (workspace) => this.mover.startMove(workspace),
-      keyCodes: [KeyCodes.M],
+      keyCodes: [KeyCodes.G],
     },
     {
       name: 'Finish move',
@@ -126,7 +126,7 @@ export class MoveActions {
 
   menuItems: ContextMenuRegistry.RegistryItem[] = [
     {
-      displayText: 'Move Block (M)',
+      displayText: 'Move Block (G)',
       preconditionFn: (scope) => {
         const workspace = scope.block?.workspace as WorkspaceSvg | null;
         if (!workspace) return 'hidden';
