@@ -10,24 +10,19 @@
  * @author aschmiedt@google.com (Abby Schmiedt)
  */
 
-import './gesture_monkey_patch';
-import './toolbox_monkey_patch';
-import { SettingsDialog } from '../test/settings_dialog';
-
-
 import * as Blockly from 'blockly/core';
 import {
   ShortcutRegistry,
   Toolbox,
   utils as BlocklyUtils,
   WorkspaceSvg,
+  keyboardNavigationController,
 } from 'blockly/core';
 
 import * as Constants from './constants';
 import {Clipboard} from './actions/clipboard';
 import {DeleteAction} from './actions/delete';
 import {EditAction} from './actions/edit';
-import {InsertAction} from './actions/insert';
 import {Navigation} from './navigation';
 import {ShortcutDialog} from './shortcut_dialog';
 import {WorkspaceMovement} from './actions/ws_movement';
@@ -37,8 +32,9 @@ import {EnterAction} from './actions/enter';
 import {DisconnectAction} from './actions/disconnect';
 import {ActionMenu} from './actions/action_menu';
 import {MoveActions} from './actions/move';
-import {Mover} from './actions/mover';
-import {UndoRedoAction} from './actions/undo_redo';
+import {COMMIT_MOVE_SHORTCUT, Mover} from './actions/mover';
+import {DuplicateAction} from './actions/duplicate';
+import {StackNavigationAction} from './actions/stack_navigation';
 
 const KeyCodes = BlocklyUtils.KeyCodes;
 
@@ -53,18 +49,17 @@ export class NavigationController {
   shortcutDialog: ShortcutDialog = new ShortcutDialog();
 
   /** Context menu and keyboard action for deletion. */
-  deleteAction: DeleteAction = new DeleteAction(this.navigation);
+  deleteAction: DeleteAction = new DeleteAction();
 
   /** Context menu and keyboard action for deletion. */
   editAction: EditAction = new EditAction(this.navigation);
 
-  /** Context menu and keyboard action for insertion. */
-  //insertAction: InsertAction = new InsertAction(this.navigation);
-
   /** Keyboard shortcut for disconnection. */
   disconnectAction: DisconnectAction = new DisconnectAction(this.navigation);
 
-  clipboard: Clipboard = new Clipboard(this.navigation);
+  clipboard: Clipboard;
+
+  duplicateAction = new DuplicateAction();
 
   workspaceMovement: WorkspaceMovement = new WorkspaceMovement(this.navigation);
 
@@ -75,11 +70,19 @@ export class NavigationController {
 
   enterAction: EnterAction = new EnterAction(this.mover, this.navigation);
 
-  undoRedoAction: UndoRedoAction = new UndoRedoAction();
-
   actionMenu: ActionMenu = new ActionMenu(this.navigation);
 
   moveActions = new MoveActions(this.mover);
+
+  stackNavigationAction: StackNavigationAction = new StackNavigationAction();
+
+  constructor(
+    private options: {allowCrossWorkspacePaste: boolean} = {
+      allowCrossWorkspacePaste: false,
+    },
+  ) {
+    this.clipboard = new Clipboard(this.navigation, options);
+  }
 
   /**
    * Original Toolbox.prototype.onShortcut method, saved by
@@ -246,49 +249,6 @@ export class NavigationController {
     this.navigation.removeWorkspace(workspace);
   }
 
-  focusWorkspace(workspace: WorkspaceSvg) {
-    this.navigation.focusWorkspace(workspace);
-  }
-
-  handleFocusWorkspace(workspace: Blockly.WorkspaceSvg) {
-    this.navigation.handleFocusWorkspace(workspace);
-  }
-
-  handleBlurWorkspace(workspace: Blockly.WorkspaceSvg) {
-    this.navigation.handleBlurWorkspace(workspace);
-  }
-
-  handleFocusOutWidgetDropdownDiv(
-    workspace: Blockly.WorkspaceSvg,
-    relatedTarget: EventTarget | null,
-  ) {
-    this.navigation.handleFocusOutWidgetDropdownDiv(workspace, relatedTarget);
-  }
-
-  focusToolbox(workspace: Blockly.WorkspaceSvg) {
-    this.navigation.focusToolbox(workspace);
-  }
-
-  handleFocusToolbox(workspace: Blockly.WorkspaceSvg) {
-    this.navigation.handleFocusToolbox(workspace);
-  }
-
-  handleBlurToolbox(workspace: Blockly.WorkspaceSvg, closeFlyout: boolean) {
-    this.navigation.handleBlurToolbox(workspace, closeFlyout);
-  }
-
-  focusFlyout(workspace: Blockly.WorkspaceSvg) {
-    this.navigation.focusFlyout(workspace);
-  }
-
-  handleFocusFlyout(workspace: Blockly.WorkspaceSvg) {
-    this.navigation.handleFocusFlyout(workspace);
-  }
-
-  handleBlurFlyout(workspace: Blockly.WorkspaceSvg, closeFlyout: boolean) {
-    this.navigation.handleBlurFlyout(workspace, closeFlyout);
-  }
-
   /**
    * Turns on keyboard navigation.
    *
@@ -318,16 +278,16 @@ export class NavigationController {
     /** Move focus to or from the toolbox. */
     focusToolbox: {
       name: Constants.SHORTCUT_NAMES.TOOLBOX,
-      preconditionFn: (workspace) =>
-        !workspace.isDragging() && this.navigation.canCurrentlyEdit(workspace),
+      preconditionFn: (workspace) => !workspace.isDragging(),
       callback: (workspace) => {
-        switch (this.navigation.getState(workspace)) {
+        keyboardNavigationController.setIsActive(true);
+        switch (this.navigation.getState()) {
           case Constants.STATE.WORKSPACE:
-            if (!workspace.getToolbox()) {
-              this.navigation.focusFlyout(workspace);
-            } else {
-              this.navigation.focusToolbox(workspace);
-            }
+            Blockly.getFocusManager().focusTree(
+              workspace.getToolbox() ??
+                workspace.getFlyout()?.getWorkspace() ??
+                workspace,
+            );
             return true;
           default:
             return false;
@@ -438,19 +398,19 @@ export class NavigationController {
       ShortcutRegistry.registry.register(shortcut);
     }
     this.deleteAction.install();
-    this.editAction.install();
-    //this.insertAction.install();
     this.workspaceMovement.install();
     this.arrowNavigation.install();
+    this.editAction.install();
     this.exitAction.install();
     this.enterAction.install();
     this.disconnectAction.install();
-    this.undoRedoAction.install();
     this.actionMenu.install();
 
     this.clipboard.install();
+    this.duplicateAction.install();
     this.moveActions.install();
     this.shortcutDialog.install();
+    this.stackNavigationAction.install();
 
     // Initialize the shortcut modal with available shortcuts.  Needs
     // to be done separately rather at construction, as many shortcuts
@@ -465,16 +425,22 @@ export class NavigationController {
     this.moveActions.uninstall();
     this.deleteAction.uninstall();
     this.editAction.uninstall();
-    //this.insertAction.uninstall();
     this.disconnectAction.uninstall();
     this.clipboard.uninstall();
+    this.duplicateAction.uninstall();
     this.workspaceMovement.uninstall();
     this.arrowNavigation.uninstall();
     this.exitAction.uninstall();
     this.enterAction.uninstall();
-    this.undoRedoAction.uninstall();
     this.actionMenu.uninstall();
     this.shortcutDialog.uninstall();
+    this.stackNavigationAction.uninstall();
+
+    // This should get unregistered when a move finishes,
+    // but it's possible the controller is disposed mid-move.
+    if (ShortcutRegistry.registry.getRegistry()[COMMIT_MOVE_SHORTCUT]) {
+      ShortcutRegistry.registry.unregister(COMMIT_MOVE_SHORTCUT);
+    }
 
     for (const shortcut of Object.values(this.shortcuts)) {
       ShortcutRegistry.registry.unregister(shortcut.name);

@@ -12,39 +12,46 @@ import {
   PAUSE_TIME,
   getBlockElementById,
   getSelectedBlockId,
-  clickBlock,
   ElementWithId,
+  focusOnBlock,
+  focusOnBlockField,
+  blockIsPresent,
+  getFocusedBlockType,
+  sendKeyAndWait,
+  checkForFailures,
+  pause,
 } from './test_setup.js';
-import {
-  ClickOptions,
-  Key,
-  KeyAction,
-  PointerAction,
-  WheelAction,
-} from 'webdriverio';
+import {Key, KeyAction, PointerAction, WheelAction} from 'webdriverio';
 
 suite('Clipboard test', function () {
-  // Setting timeout to unlimited as these tests take longer time to run
-  this.timeout(0);
+  // Disable timeouts when non-zero PAUSE_TIME is used to watch tests run.
+  if (PAUSE_TIME) this.timeout(0);
 
-  // Clear the workspace and load start blocks
+  // Clear the workspace and load start blocks.
   setup(async function () {
-    this.browser = await testSetup(testFileLocations.BASE);
-    await this.browser.pause(PAUSE_TIME);
+    this.browser = await testSetup(testFileLocations.BASE, this.timeout());
+    await pause(this.browser);
+  });
+
+  teardown(async function () {
+    await checkForFailures(
+      this.browser,
+      this.currentTest?.title,
+      this.currentTest?.state,
+    );
   });
 
   test('Copy and paste while block selected', async function () {
-    const block = await getBlockElementById(this.browser, 'draw_circle_1');
-    await clickBlock(this.browser, block, {button: 1} as ClickOptions);
+    // Navigate to draw_circle_1.
+    await focusOnBlock(this.browser, 'draw_circle_1');
 
     // Copy and paste
-    await this.browser.keys([Key.Ctrl, 'c']);
-    await this.browser.keys([Key.Ctrl, 'v']);
-    await this.browser.pause(PAUSE_TIME);
+    await sendKeyAndWait(this.browser, [Key.Ctrl, 'c']);
+    await sendKeyAndWait(this.browser, [Key.Ctrl, 'v']);
 
+    const block = await getBlockElementById(this.browser, 'draw_circle_1');
     const blocks = await getSameBlocks(this.browser, block);
     const selectedId = await getSelectedBlockId(this.browser);
-
     chai.assert.equal(await blocks.length, 2);
     chai.assert.equal(
       selectedId,
@@ -54,21 +61,19 @@ suite('Clipboard test', function () {
   });
 
   test('Cut and paste while block selected', async function () {
+    // Navigate to draw_circle_1.
+    await focusOnBlock(this.browser, 'draw_circle_1');
     const block = await getBlockElementById(this.browser, 'draw_circle_1');
-    await clickBlock(this.browser, block, {button: 1} as ClickOptions);
 
     // Cut and paste
-    await this.browser.keys([Key.Ctrl, 'x']);
+    await sendKeyAndWait(this.browser, [Key.Ctrl, 'x']);
     await block.waitForExist({reverse: true});
-    await this.browser.keys([Key.Ctrl, 'v']);
-    await block.waitForExist();
-    await this.browser.pause(PAUSE_TIME);
+    await sendKeyAndWait(this.browser, [Key.Ctrl, 'v']);
 
-    const blocks = await getSameBlocks(this.browser, block);
-    const selectedId = await getSelectedBlockId(this.browser);
+    const focusedType = await getFocusedBlockType(this.browser);
 
-    chai.assert.equal(await blocks.length, 1);
-    chai.assert.equal(selectedId, await blocks[0].getAttribute('data-id'));
+    // Pasted block should be focused.
+    chai.assert.equal(focusedType, 'simple_circle');
   });
 
   test('Copy and paste whilst dragging block', async function () {
@@ -111,6 +116,21 @@ suite('Clipboard test', function () {
       initialWsBlocks,
       await serializeWorkspaceBlocks(this.browser),
       'Blocks on the workspace should not have changed',
+    );
+  });
+
+  test('Do not cut block while field editor is open', async function () {
+    // Open a field editor
+    await focusOnBlockField(this.browser, 'draw_circle_1_color', 'COLOUR');
+    await pause(this.browser);
+    await sendKeyAndWait(this.browser, Key.Enter);
+
+    // Try to cut block while field editor is open
+    await sendKeyAndWait(this.browser, [Key.Ctrl, 'x']);
+
+    // Block is not deleted
+    chai.assert.isTrue(
+      await blockIsPresent(this.browser, 'draw_circle_1_color'),
     );
   });
 });
@@ -156,7 +176,7 @@ async function performActionWhileDraggingBlock(
       .move(blockX, blockY),
     action,
   ]);
-  await browser.pause(PAUSE_TIME);
+  await pause(browser);
 }
 
 /**

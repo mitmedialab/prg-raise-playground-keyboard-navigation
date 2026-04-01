@@ -5,11 +5,11 @@
  */
 
 import {
-  ASTNode,
   BlockSvg,
-  RenderedConnection,
+  Events,
   ShortcutRegistry,
   utils as BlocklyUtils,
+  keyboardNavigationController,
 } from 'blockly';
 import * as Constants from '../constants';
 import type {WorkspaceSvg} from 'blockly';
@@ -55,7 +55,8 @@ export class DisconnectAction {
       preconditionFn: (workspace) =>
         this.navigation.canCurrentlyEdit(workspace),
       callback: (workspace) => {
-        switch (this.navigation.getState(workspace)) {
+        keyboardNavigationController.setIsActive(true);
+        switch (this.navigation.getState()) {
           case Constants.STATE.WORKSPACE:
             this.disconnectBlocks(workspace);
             return true;
@@ -77,66 +78,15 @@ export class DisconnectAction {
    */
   disconnectBlocks(workspace: WorkspaceSvg) {
     const cursor = workspace.getCursor();
-    if (!cursor) {
-      return;
-    }
-    let curNode: ASTNode | null = cursor.getCurNode();
-    let wasVisitingConnection = true;
-    while (curNode && !curNode.isConnection()) {
-      const location = curNode.getLocation();
-      if (location instanceof BlockSvg) {
-        const previous = location.previousConnection;
-        const output = location.outputConnection;
-        if (previous?.isConnected()) {
-          curNode = ASTNode.createConnectionNode(previous);
-          break;
-        } else if (output?.isConnected()) {
-          curNode = ASTNode.createConnectionNode(output);
-          break;
-        }
-      }
+    const curNode = cursor.getCurNode();
+    if (!(curNode instanceof BlockSvg)) return;
 
-      curNode = curNode.out();
-      wasVisitingConnection = false;
-    }
-    if (!curNode) {
-      console.log('Unable to find a connection to disconnect');
-      return;
-    }
-    const curConnection = curNode.getLocation() as RenderedConnection;
-    if (!curConnection.isConnected()) {
-      return;
-    }
-    const targetConnection = curConnection.targetConnection;
-    if (!targetConnection) {
-      throw new Error('Must have target if connected');
-    }
+    const healStack = !curNode.outputConnection?.isConnected();
+    Events.setGroup(true);
+    curNode.unplug(healStack);
+    Events.setGroup(false);
 
-    const superiorConnection = curConnection.isSuperior()
-      ? curConnection
-      : targetConnection;
-
-    const inferiorConnection = curConnection.isSuperior()
-      ? targetConnection
-      : curConnection;
-
-    if (inferiorConnection.getSourceBlock().isShadow()) {
-      return;
-    }
-
-    if (!inferiorConnection.getSourceBlock().isMovable()) {
-      return;
-    }
-
-    superiorConnection.disconnect();
-    inferiorConnection.bumpAwayFrom(superiorConnection);
-
-    const rootBlock = superiorConnection.getSourceBlock().getRootBlock();
-    rootBlock.bringToFront();
-
-    if (wasVisitingConnection) {
-      const connectionNode = ASTNode.createConnectionNode(superiorConnection);
-      workspace.getCursor()?.setCurNode(connectionNode);
-    }
+    // Needed or we end up with passive focus.
+    cursor.setCurNode(curNode);
   }
 }

@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {ShortcutRegistry, utils as BlocklyUtils} from 'blockly/core';
+import {
+  ShortcutRegistry,
+  utils as BlocklyUtils,
+  getFocusManager,
+  Gesture,
+  icons,
+} from 'blockly/core';
 
 import * as Constants from '../constants';
 import type {Navigation} from '../navigation';
@@ -26,11 +32,34 @@ export class ExitAction {
       preconditionFn: (workspace) =>
         this.navigation.canCurrentlyNavigate(workspace),
       callback: (workspace) => {
-        switch (this.navigation.getState(workspace)) {
+        switch (this.navigation.getState()) {
           case Constants.STATE.FLYOUT:
           case Constants.STATE.TOOLBOX:
-            this.navigation.focusWorkspace(workspace);
+            getFocusManager().focusTree(workspace.targetWorkspace ?? workspace);
+            if (!Gesture.inProgress()) {
+              workspace.hideChaff();
+            }
             return true;
+          case Constants.STATE.WORKSPACE: {
+            if (workspace.isMutator) {
+              const parent = workspace.options.parentWorkspace
+                ?.getAllBlocks()
+                .map((block) => block.getIcons())
+                .flat()
+                .find(
+                  (icon): icon is icons.MutatorIcon =>
+                    icon instanceof icons.MutatorIcon &&
+                    icon.bubbleIsVisible() &&
+                    icon.getBubble()?.getWorkspace() === workspace,
+                );
+              if (parent) {
+                parent.setBubbleVisible(false);
+                getFocusManager().focusNode(parent);
+                return true;
+              }
+            }
+            return false;
+          }
           default:
             return false;
         }

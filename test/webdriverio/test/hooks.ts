@@ -15,8 +15,8 @@ import {driverSetup, driverTeardown} from './test_setup.js';
 export const mochaHooks: RootHookObject = {
   async beforeAll(this: Mocha.Context) {
     // Set a long timeout for startup.
-    this.timeout(10000);
-    return await driverSetup();
+    this.timeout(60000);
+    return await driverSetup(this.timeout());
   },
   async afterAll() {
     return await driverTeardown();

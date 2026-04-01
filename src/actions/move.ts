@@ -6,12 +6,21 @@
 
 import {
   ContextMenuRegistry,
+  Msg,
   ShortcutRegistry,
   utils,
   WorkspaceSvg,
+  keyboardNavigationController,
+  getFocusManager,
+  comments,
+  IDraggable,
+  IFocusableNode,
+  IBoundedElement,
+  ISelectable,
 } from 'blockly';
 import {Direction} from '../drag_direction';
-import {Mover} from './mover';
+import {Mover, MoveType} from './mover';
+import {getMenuItem} from '../shortcut_formatting';
 
 const KeyCodes = utils.KeyCodes;
 const createSerializedKey = ShortcutRegistry.registry.createSerializedKey.bind(
@@ -19,7 +28,7 @@ const createSerializedKey = ShortcutRegistry.registry.createSerializedKey.bind(
 );
 
 /**
- * Actions for moving blocks with keyboard shortcuts.
+ * Actions for moving workspace elements with keyboard shortcuts.
  */
 export class MoveActions {
   constructor(private mover: Mover) {}
@@ -27,20 +36,37 @@ export class MoveActions {
   private shortcuts: ShortcutRegistry.KeyboardShortcut[] = [
     // Begin and end move.
     {
-      name: 'Start move',
-      preconditionFn: (workspace) => this.mover.canMove(workspace),
-      callback: (workspace) => this.mover.startMove(workspace),
+      name: 'start_move',
+      preconditionFn: (workspace) => {
+        const startDraggable = this.getCurrentDraggable(workspace);
+        return (
+          !!startDraggable && this.mover.canMove(workspace, startDraggable)
+        );
+      },
+      callback: (workspace) => {
+        keyboardNavigationController.setIsActive(true);
+        const startDraggable = this.getCurrentDraggable(workspace);
+        // Focus the root draggable in case one of its children
+        // was focused when the move was triggered.
+        if (startDraggable) {
+          getFocusManager().focusNode(startDraggable);
+        }
+        return (
+          !!startDraggable &&
+          this.mover.startMove(workspace, startDraggable, MoveType.Move, null)
+        );
+      },
       keyCodes: [KeyCodes.G],
     },
     {
-      name: 'Finish move',
+      name: 'finish_move',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) => this.mover.finishMove(workspace),
       keyCodes: [KeyCodes.ENTER, KeyCodes.SPACE],
       allowCollision: true,
     },
     {
-      name: 'Abort move',
+      name: 'abort_move',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) => this.mover.abortMove(workspace),
       keyCodes: [KeyCodes.ESC],
@@ -49,7 +75,7 @@ export class MoveActions {
 
     // Constrained moves.
     {
-      name: 'Move left, constrained',
+      name: 'move_left_constrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveConstrained(workspace, Direction.Left),
@@ -57,7 +83,7 @@ export class MoveActions {
       allowCollision: true,
     },
     {
-      name: 'Move right constrained',
+      name: 'move_right_constrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveConstrained(workspace, Direction.Right),
@@ -65,7 +91,7 @@ export class MoveActions {
       allowCollision: true,
     },
     {
-      name: 'Move up, constrained',
+      name: 'move_up_constrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveConstrained(workspace, Direction.Up),
@@ -73,7 +99,7 @@ export class MoveActions {
       allowCollision: true,
     },
     {
-      name: 'Move down constrained',
+      name: 'move_down_constrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveConstrained(workspace, Direction.Down),
@@ -83,7 +109,7 @@ export class MoveActions {
 
     // Unconstrained moves.
     {
-      name: 'Move left, unconstrained',
+      name: 'move_left_unconstrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveUnconstrained(workspace, Direction.Left),
@@ -93,7 +119,7 @@ export class MoveActions {
       ],
     },
     {
-      name: 'Move right, unconstrained',
+      name: 'move_right_unconstrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveUnconstrained(workspace, Direction.Right),
@@ -103,7 +129,7 @@ export class MoveActions {
       ],
     },
     {
-      name: 'Move up unconstrained',
+      name: 'move_up_unconstrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveUnconstrained(workspace, Direction.Up),
@@ -113,7 +139,7 @@ export class MoveActions {
       ],
     },
     {
-      name: 'Move down, unconstrained',
+      name: 'move_down_unconstrained',
       preconditionFn: (workspace) => this.mover.isMoving(workspace),
       callback: (workspace) =>
         this.mover.moveUnconstrained(workspace, Direction.Down),
@@ -124,36 +150,78 @@ export class MoveActions {
     },
   ];
 
-  menuItems: ContextMenuRegistry.RegistryItem[] = [
+  private menuItems: ContextMenuRegistry.RegistryItem[] = [
     {
-      displayText: 'Move Block (G)',
-      preconditionFn: (scope) => {
+      displayText: () => getMenuItem(Msg['MOVE_BLOCK'], 'start_move'),
+      preconditionFn: (scope, menuOpenEvent) => {
         const workspace = scope.block?.workspace as WorkspaceSvg | null;
-        if (!workspace) return 'hidden';
-        return this.mover.canMove(workspace) ? 'enabled' : 'disabled';
+        if (!workspace || menuOpenEvent instanceof PointerEvent)
+          return 'hidden';
+
+        const startDraggable = this.getCurrentDraggable(workspace);
+        return !!startDraggable && this.mover.canMove(workspace, startDraggable)
+          ? 'enabled'
+          : 'disabled';
       },
       callback: (scope) => {
         const workspace = scope.block?.workspace as WorkspaceSvg | null;
         if (!workspace) return false;
-        this.mover.startMove(workspace);
+        const startDraggable = this.getCurrentDraggable(workspace);
+        // Focus the start block in case one of its fields or a shadow block
+        // was focused when the move was triggered.
+        if (startDraggable) {
+          getFocusManager().focusNode(startDraggable);
+        }
+        return (
+          !!startDraggable &&
+          this.mover.startMove(workspace, startDraggable, MoveType.Move, null)
+        );
       },
       scopeType: ContextMenuRegistry.ScopeType.BLOCK,
       id: 'move',
       weight: 8.5,
     },
+    {
+      displayText: () =>
+        getMenuItem(Msg['MOVE_COMMENT'] ?? 'Move Comment', 'start_move'),
+      preconditionFn: (scope, menuOpenEvent) => {
+        const comment = scope.comment;
+        if (!comment) return 'hidden';
+
+        return this.mover.canMove(comment.workspace, comment)
+          ? 'enabled'
+          : 'disabled';
+      },
+      callback: (scope) => {
+        const comment = scope.comment;
+        if (!comment) return false;
+        this.mover.startMove(comment.workspace, comment, MoveType.Move, null);
+      },
+      scopeType: ContextMenuRegistry.ScopeType.COMMENT,
+      id: 'move_comment',
+      weight: 8.5,
+    },
   ];
+
+  private registerShortcuts() {
+    for (const shortcut of this.shortcuts) {
+      ShortcutRegistry.registry.register(shortcut);
+    }
+  }
+
+  private registerMenuItems() {
+    for (const menuItem of this.menuItems) {
+      ContextMenuRegistry.registry.register(menuItem);
+    }
+  }
 
   /**
    * Install the actions as both keyboard shortcuts and (where
    * applicable) context menu items.
    */
   install() {
-    for (const shortcut of this.shortcuts) {
-      ShortcutRegistry.registry.register(shortcut);
-    }
-    for (const menuItem of this.menuItems) {
-      ContextMenuRegistry.registry.register(menuItem);
-    }
+    this.registerShortcuts();
+    this.registerMenuItems();
   }
 
   /**
@@ -166,5 +234,35 @@ export class MoveActions {
     for (const menuItem of this.menuItems) {
       ContextMenuRegistry.registry.unregister(menuItem.id);
     }
+  }
+
+  /**
+   * Get the source draggable for the cursor location, or undefined if no
+   * source draggable can be found.
+   * If the cursor is on a shadow block, walks up the tree until it finds
+   * a non-shadow block to drag.
+   *
+   * @param workspace The workspace to inspect for a cursor.
+   * @returns The source draggable, or undefined if no appropriate draggable
+   *     could be found.
+   */
+  getCurrentDraggable(
+    workspace: WorkspaceSvg,
+  ): (IDraggable & IFocusableNode & IBoundedElement & ISelectable) | undefined {
+    const node = getFocusManager().getFocusedNode();
+    if (node instanceof comments.RenderedWorkspaceComment) return node;
+
+    let block = workspace.getCursor().getSourceBlock();
+    if (!block) return undefined;
+    while (block.isShadow()) {
+      block = block.getParent();
+      if (!block) {
+        throw new Error(
+          'Tried to drag a shadow block with no parent. ' +
+            'Shadow blocks should always have parents.',
+        );
+      }
+    }
+    return block;
   }
 }

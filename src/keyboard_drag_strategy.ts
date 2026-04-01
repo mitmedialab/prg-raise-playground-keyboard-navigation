@@ -5,15 +5,16 @@
  */
 
 import {
-  ASTNode,
   BlockSvg,
   ConnectionType,
-  LineCursor,
   RenderedConnection,
   dragging,
   utils,
 } from 'blockly';
 import {Direction, getDirectionFromXY} from './drag_direction';
+import {showUnconstrainedMoveHint} from './hints';
+import {MoveIcon} from './move_icon';
+import {MoveType} from './actions/mover';
 
 // Copied in from core because it is not exported.
 interface ConnectionCandidate {
@@ -33,10 +34,38 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
   private currentDragDirection: Direction | null = null;
 
   /** Where a constrained movement should start when traversing the tree. */
-  private searchNode: ASTNode | null = null;
+  private searchNode: RenderedConnection | null = null;
+
+  /** List of all connections available on the workspace. */
+  private allConnections: RenderedConnection[] = [];
+
+  constructor(
+    private block: BlockSvg,
+    public moveType: MoveType,
+    private startPoint: RenderedConnection | null,
+  ) {
+    super(block);
+  }
 
   override startDrag(e?: PointerEvent) {
     super.startDrag(e);
+
+    for (const topBlock of this.block.workspace.getTopBlocks(true)) {
+      this.allConnections.push(
+        ...topBlock
+          .getDescendants(true)
+          .filter((block: BlockSvg) => !block.isShadow())
+          .flatMap((block: BlockSvg) => block.getConnections_(false))
+          .sort((a: RenderedConnection, b: RenderedConnection) => {
+            let delta = a.y - b.y;
+            if (delta === 0) {
+              delta = a.x - b.x;
+            }
+            return delta;
+          }),
+      );
+    }
+
     // Set position of the dragging block, so that it doesn't pop
     // to the top left of the workspace.
     // @ts-expect-error block and startLoc are private.
@@ -44,6 +73,7 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
     // @ts-expect-error connectionCandidate is private.
     this.connectionCandidate = this.createInitialCandidate();
     this.forceShowPreview();
+    this.block.addIcon(new MoveIcon(this.block));
   }
 
   override drag(newLoc: utils.Coordinate, e?: PointerEvent): void {
@@ -59,17 +89,30 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
         .neighbour;
       // The next constrained move will resume the search from the current
       // candidate location.
-      this.searchNode = ASTNode.createConnectionNode(neighbour);
-      // The moving block will be positioned slightly down and to the
-      // right of the connection it found.
-      // @ts-expect-error block is private.
-      this.block.moveDuringDrag(
-        new utils.Coordinate(neighbour.x + 10, neighbour.y + 10),
-      );
+      this.searchNode = neighbour;
+      if (this.isConstrainedMovement()) {
+        // Position the moving block down and slightly to the right of the
+        // target connection.
+        this.block.moveDuringDrag(
+          new utils.Coordinate(neighbour.x + 10, neighbour.y + 10),
+        );
+      }
     } else {
       // Handle the case when unconstrained drag was far from any candidate.
       this.searchNode = null;
+
+      if (this.isConstrainedMovement()) {
+        // @ts-expect-error private field
+        const workspace = this.workspace;
+        showUnconstrainedMoveHint(workspace, true);
+      }
     }
+  }
+
+  override endDrag(e?: PointerEvent) {
+    super.endDrag(e);
+    this.allConnections = [];
+    this.block.removeIcon(MoveIcon.type);
   }
 
   /**
@@ -85,6 +128,9 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
   ): ConnectionCandidate | null {
     // @ts-expect-error getLocalConnections is private.
     const localConns = this.getLocalConnections(draggingBlock);
+    if (localConns.length == 0) {
+      return null;
+    }
 
     let candidateConnection = this.findTraversalCandidate(
       draggingBlock,
@@ -140,37 +186,35 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
     draggingBlock: BlockSvg,
     localConns: RenderedConnection[],
   ): ConnectionCandidate | null {
-    // TODO(#385): Make sure this works for any cursor, not just LineCursor.
-    const cursor = draggingBlock.workspace.getCursor() as LineCursor;
-    if (!cursor) return null;
-
     const connectionChecker = draggingBlock.workspace.connectionChecker;
     let candidateConnection: ConnectionCandidate | null = null;
-    let potential: ASTNode | null = this.searchNode;
+    let potential: RenderedConnection | null = this.searchNode;
+
     const dir = this.currentDragDirection;
     while (potential && !candidateConnection) {
+      const potentialIndex = this.allConnections.indexOf(potential);
       if (dir === Direction.Up || dir === Direction.Left) {
-        potential = cursor.getPreviousNode(potential, (node) => {
-          // @ts-expect-error isConnectionType is private.
-          return node && ASTNode.isConnectionType(node.getType());
-        });
+        potential =
+          this.allConnections[potentialIndex - 1] ??
+          this.allConnections[this.allConnections.length - 1];
       } else if (dir === Direction.Down || dir === Direction.Right) {
-        potential = cursor.getNextNode(potential, (node) => {
-          // @ts-expect-error isConnectionType is private.
-          return node && ASTNode.isConnectionType(node.getType());
-        });
+        potential =
+          this.allConnections[potentialIndex + 1] ?? this.allConnections[0];
       }
 
       localConns.forEach((conn: RenderedConnection) => {
-        const location = potential?.getLocation() as RenderedConnection;
-        if (connectionChecker.canConnect(conn, location, true, Infinity)) {
+        if (
+          potential &&
+          connectionChecker.canConnect(conn, potential, true, Infinity)
+        ) {
           candidateConnection = {
             local: conn,
-            neighbour: location,
+            neighbour: potential,
             distance: 0,
           };
         }
       });
+      if (potential == this.searchNode) break;
     }
     return candidateConnection;
   }
@@ -219,7 +263,6 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
     // @ts-expect-error connectionCandidate is private
     const candidate = this.connectionCandidate as ConnectionCandidate;
     if (!candidate || !previewer) return;
-    // @ts-expect-error block is private
     const block = this.block;
 
     // This is essentially a copy of the second half of updateConnectionPreview
@@ -263,30 +306,36 @@ export class KeyboardDragStrategy extends dragging.BlockDragStrategy {
    */
   private createInitialCandidate(): ConnectionCandidate | null {
     // @ts-expect-error startParentConn is private.
-    const neighbour = this.startParentConn;
+    const neighbour = this.startPoint ?? this.startParentConn;
     if (neighbour) {
-      this.searchNode = ASTNode.createConnectionNode(neighbour);
+      this.searchNode = neighbour;
       switch (neighbour.type) {
-        case ConnectionType.INPUT_VALUE:
-          return {
-            neighbour: neighbour,
-            // @ts-expect-error block is private.
-            local: this.block.outputConnection,
-            distance: 0,
-          };
-        case ConnectionType.NEXT_STATEMENT:
-          return {
-            neighbour: neighbour,
-            // @ts-expect-error block is private.
-            local: this.block.previousConnection,
-            distance: 0,
-          };
+        case ConnectionType.INPUT_VALUE: {
+          if (this.block.outputConnection) {
+            return {
+              neighbour: neighbour,
+              local: this.block.outputConnection,
+              distance: 0,
+            };
+          }
+          break;
+        }
+        case ConnectionType.NEXT_STATEMENT: {
+          if (this.block.previousConnection) {
+            return {
+              neighbour: neighbour,
+              local: this.block.previousConnection,
+              distance: 0,
+            };
+          }
+          break;
+        }
       }
     }
     return null;
   }
 
   override shouldHealStack(e: PointerEvent | undefined): boolean {
-    return true;
+    return Boolean(this.block.previousConnection);
   }
 }

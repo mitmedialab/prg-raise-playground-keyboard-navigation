@@ -15,41 +15,12 @@ import * as Constants from './constants';
 import {
   registrationName as cursorRegistrationName,
   registrationType as cursorRegistrationType,
-  FlyoutCursor,
 } from './flyout_cursor';
-import {
-  getFlyoutElement,
-  getToolboxElement,
-  getWorkspaceElement,
-} from './workspace_utilities';
-import {PassiveFocus} from './passive_focus';
-
-/**
- * The default coordinate to use when focusing on the workspace and no
- * blocks are present. In pixel coordinates, but will be converted to
- * workspace coordinates when used to position the cursor.
- */
-const DEFAULT_WS_COORDINATE: Blockly.utils.Coordinate =
-  new Blockly.utils.Coordinate(100, 100);
-
-/**
- * The default coordinate to use when moving the cursor to the workspace
- * after a block has been deleted. In pixel coordinates, but will be
- * converted to workspace coordinates when used to position the cursor.
- */
-const WS_COORDINATE_ON_DELETE: Blockly.utils.Coordinate =
-  new Blockly.utils.Coordinate(100, 100);
 
 /**
  * Class that holds all methods necessary for keyboard navigation to work.
  */
 export class Navigation {
-  /**
-   * Object holding the location of the cursor for each workspace.
-   * Possible locations of the cursor are: workspace, flyout or toolbox.
-   */
-  workspaceStates: {[index: string]: Constants.STATE} = {};
-
   /**
    * Wrapper for method that deals with workspace changes.
    * Used for removing change listener.
@@ -67,11 +38,6 @@ export class Navigation {
    * Used when removing change listeners in dispose.
    */
   protected workspaces: Blockly.WorkspaceSvg[] = [];
-
-  /**
-   * An object that renders a passive focus indicator at a specified location.
-   */
-  private passiveFocusIndicator: PassiveFocus = new PassiveFocus();
 
   /**
    * Constructor for keyboard navigation.
@@ -106,15 +72,11 @@ export class Navigation {
   removeWorkspace(workspace: Blockly.WorkspaceSvg) {
     const workspaceIdx = this.workspaces.indexOf(workspace);
     const flyout = workspace.getFlyout();
-
-    if (workspace.getCursor()) {
-      this.disableKeyboardAccessibility(workspace);
-    }
+    this.disableKeyboardAccessibility(workspace);
 
     if (workspaceIdx > -1) {
       this.workspaces.splice(workspaceIdx, 1);
     }
-    this.passiveFocusIndicator.dispose();
     workspace.removeChangeListener(this.wsChangeWrapper);
 
     if (flyout) {
@@ -123,35 +85,34 @@ export class Navigation {
   }
 
   /**
-   * Sets the state for the given workspace.
-   *
-   * @param workspace The workspace to set the state on.
-   * @param state The navigation state.
-   */
-  setState(workspace: Blockly.WorkspaceSvg, state: Constants.STATE) {
-    this.workspaceStates[workspace.id] = state;
-  }
-
-  /**
    * Gets the navigation state of the current workspace.
    *
-   * @param workspace The workspace to get the state of.
+   * Note that this assumes a workspace with passive focus (including for its
+   * toolbox or flyout) has a state of NOWHERE.
+   *
    * @returns The state of the given workspace.
    */
-  getState(workspace: Blockly.WorkspaceSvg): Constants.STATE {
-    return this.workspaceStates[workspace.id];
-  }
+  getState(): Constants.STATE {
+    const focusManager = Blockly.getFocusManager();
+    if (focusManager.ephemeralFocusTaken()) {
+      return Constants.STATE.NOWHERE;
+    }
 
-  /**
-   * Gets the node to use as context for insert operations.
-   *
-   * @param workspace The main workspace.
-   */
-  getStationaryNode(workspace: Blockly.WorkspaceSvg) {
-    return (
-      this.passiveFocusIndicator.getCurNode() ??
-      workspace.getCursor()?.getCurNode()
-    );
+    const focusedTree = focusManager.getFocusedTree();
+    if (focusedTree instanceof Blockly.WorkspaceSvg) {
+      if (focusedTree.isFlyout) {
+        return Constants.STATE.FLYOUT;
+      } else {
+        return Constants.STATE.WORKSPACE;
+      }
+    } else if (focusedTree instanceof Blockly.Toolbox) {
+      return Constants.STATE.TOOLBOX;
+    } else if (focusedTree instanceof Blockly.Flyout) {
+      return Constants.STATE.FLYOUT;
+    }
+    // Either a non-Blockly element currently has DOM focus, or a different
+    // workspace holds it.
+    return Constants.STATE.NOWHERE;
   }
 
   /**
@@ -201,31 +162,10 @@ export class Navigation {
     if (!workspace || !workspace.keyboardAccessibilityMode) {
       return;
     }
-    switch (e.type) {
-      case Blockly.Events.DELETE:
-        this.handleBlockDeleteByDrag(
-          workspace,
-          e as Blockly.Events.BlockDelete,
-        );
-        break;
-      case Blockly.Events.BLOCK_CHANGE:
-        if ((e as Blockly.Events.BlockChange).element === 'mutation') {
-          this.handleBlockMutation(workspace, e as Blockly.Events.BlockChange);
-        }
-        break;
-      case Blockly.Events.BLOCK_CREATE:
-        if (workspace.isDragging()) {
-          // Hide the passive focus indicator when dragging so as not to fight
-          // with the drop cues. Safe because of the gesture monkey patch.
-          this.passiveFocusIndicator.hide();
-        }
-        break;
-    }
-
-    // Hiding the cursor isn't permanent and can show again when we render.
-    // Rehide it:
-    if (this.passiveFocusIndicator.isVisible()) {
-      workspace.getCursor()?.hide();
+    if (e.type === Blockly.Events.BLOCK_CHANGE) {
+      if ((e as Blockly.Events.BlockChange).element === 'mutation') {
+        this.handleBlockMutation(workspace, e as Blockly.Events.BlockChange);
+      }
     }
   }
 
@@ -241,14 +181,14 @@ export class Navigation {
     }
     const flyoutWorkspace = Blockly.Workspace.getById(
       e.workspaceId,
-    ) as Blockly.WorkspaceSvg;
+    ) as Blockly.WorkspaceSvg | null;
     
     // Add this null check
     if (!flyoutWorkspace) {
       return;
     }
     
-    const mainWorkspace = flyoutWorkspace.targetWorkspace;
+    const mainWorkspace = flyoutWorkspace?.targetWorkspace;
     if (!mainWorkspace) {
       return;
     }
@@ -287,7 +227,7 @@ export class Navigation {
       }
     } else if (
       e.type === Blockly.Events.BLOCK_CREATE &&
-      this.getState(mainWorkspace) === Constants.STATE.FLYOUT
+      this.getState() === Constants.STATE.FLYOUT
     ) {
       // When variables are created, that recreates the flyout contents, leaving the
       // cursor in an invalid state.
@@ -295,15 +235,15 @@ export class Navigation {
     }
   }
 
-  private isFlyoutItemDisposed(node: Blockly.ASTNode) {
-    if (node.getSourceBlock()?.disposed) {
+  private isFlyoutItemDisposed(
+    node: Blockly.IFocusableNode,
+    sourceBlock: Blockly.BlockSvg | null,
+  ) {
+    if (sourceBlock?.disposed) {
       return true;
     }
-    const location = node.getLocation();
-    if (location instanceof Blockly.FlyoutButton) {
-      // No nice way to tell for a button. In v12 we could use getSvgGroup().
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (location as any).svgGroup.parentNode === null;
+    if (node instanceof Blockly.FlyoutButton) {
+      return node.getSvgRoot().parentNode === null;
     }
     return false;
   }
@@ -322,39 +262,9 @@ export class Navigation {
   ) {
     const mutatedBlockId = e.blockId;
     const cursor = workspace.getCursor();
-    if (cursor) {
-      const curNode = cursor.getCurNode();
-      const block = curNode ? curNode.getSourceBlock() : null;
-      if (block && block.id === mutatedBlockId) {
-        cursor.setCurNode(Blockly.ASTNode.createBlockNode(block));
-      }
-    }
-  }
-
-  /**
-   * Moves the cursor to the workspace when its parent block is deleted by
-   * being dragged to the flyout or to the trashcan.
-   *
-   * @param workspace The workspace the block was on.
-   * @param e The event emitted when a block is deleted.
-   */
-  handleBlockDeleteByDrag(
-    workspace: Blockly.WorkspaceSvg,
-    e: Blockly.Events.BlockDelete,
-  ) {
-    const deletedBlockId = e.blockId;
-    const ids = e.ids ?? [];
-    const cursor = workspace.getCursor();
-    if (!cursor) return;
-
-    // Make sure the cursor is on a block.
-    const sourceBlock = cursor.getCurNode()?.getSourceBlock();
-    if (!sourceBlock) return;
-
-    if (sourceBlock.id === deletedBlockId || ids.includes(sourceBlock.id)) {
-      cursor.setCurNode(
-        Blockly.ASTNode.createWorkspaceNode(workspace, WS_COORDINATE_ON_DELETE),
-      );
+    const block = cursor.getSourceBlock();
+    if (block && block.id === mutatedBlockId) {
+      cursor.setCurNode(block);
     }
   }
 
@@ -374,193 +284,12 @@ export class Navigation {
     }
     const curNodeBlock = block.isShadow() ? block : block.getParent();
     if (curNodeBlock) {
-      this.getFlyoutCursor(mainWorkspace)?.setCurNode(
-        Blockly.ASTNode.createStackNode(curNodeBlock),
-      );
+      this.getFlyoutCursor(mainWorkspace)?.setCurNode(curNodeBlock);
     }
-    this.focusFlyout(mainWorkspace);
-  }
-
-  /**
-   * Sets browser focus to the workspace.
-   *
-   * @param workspace The workspace to focus.
-   */
-  focusWorkspace(workspace: Blockly.WorkspaceSvg) {
-    getWorkspaceElement(workspace).focus();
-  }
-
-  /**
-   * Sets the navigation state to workspace and moves the cursor to either the
-   * top block on a workspace or to the workspace. Switches from passive focus
-   * indication to showing the cursor.
-   *
-   * @param workspace The workspace that has gained focus.
-   */
-  handleFocusWorkspace(workspace: Blockly.WorkspaceSvg) {
-    this.setState(workspace, Constants.STATE.WORKSPACE);
-    if (!Blockly.Gesture.inProgress()) {
-      workspace.hideChaff();
-      // This will make a selection which would interfere with any gesture.
-      this.defaultWorkspaceCursorPositionIfNeeded(workspace);
+    const flyout = mainWorkspace.getFlyout();
+    if (flyout) {
+      Blockly.getFocusManager().focusTree(flyout.getWorkspace());
     }
-
-    const cursor = workspace.getCursor();
-    if (cursor) {
-      const passiveFocusNode = this.passiveFocusIndicator.getCurNode();
-      this.passiveFocusIndicator.hide();
-      // If there's a gesture then it will either set the node or be a click
-      // that should not set one.
-      if (!Blockly.Gesture.inProgress() && passiveFocusNode) {
-        cursor.setCurNode(passiveFocusNode);
-      }
-    }
-  }
-
-  /**
-   * Clears navigation state and switches to using the passive focus indicator
-   * if it is not the context menu / field input that is causing blur.
-   *
-   * @param workspace The workspace that has lost focus.
-   * @param ignorePopUpDivs Whether to skip the focus indicator change when
-   *     the widget/dropdown divs are open.
-   */
-  handleBlurWorkspace(
-    workspace: Blockly.WorkspaceSvg,
-    ignorePopUpDivs = false,
-  ) {
-    this.setState(workspace, Constants.STATE.NOWHERE);
-    const cursor = workspace.getCursor();
-    const popUpDivsShowing =
-      Blockly.WidgetDiv.isVisible() || Blockly.DropDownDiv.isVisible();
-    if (cursor && (ignorePopUpDivs || !popUpDivsShowing)) {
-      const curNode = cursor.getCurNode();
-      if (curNode) {
-        this.passiveFocusIndicator.show(curNode);
-      }
-      // It's initially null so this is a valid state despite the types.
-      cursor.setCurNode(null);
-    }
-  }
-
-  /**
-   * Handle the widget or dropdown div losing focus (via focusout).
-   *
-   * Because we skip the widget/dropdown div cases in `handleBlurWorkspace` we need
-   * to catch them here.
-   *
-   * @param workspace The workspace.
-   * @param relatedTarget The related target (newly focused element if any).
-   */
-  handleFocusOutWidgetDropdownDiv(
-    workspace: Blockly.WorkspaceSvg,
-    relatedTarget: EventTarget | null,
-  ) {
-    if (relatedTarget === null) {
-      // Workaround:
-      // Skip document.body/null case until this blur bug is fixed to avoid
-      // flipping to passive focus as the user moves their mouse over the
-      // colour picker.
-      // https://github.com/google/blockly-samples/issues/2498
-      return;
-    }
-    if (relatedTarget !== getWorkspaceElement(workspace)) {
-      this.handleBlurWorkspace(workspace, true);
-    }
-  }
-
-  /**
-   * Sets browser focus to the toolbox (if any).
-   *
-   * @param workspace The workspace with the toolbox.
-   */
-  focusToolbox(workspace: Blockly.WorkspaceSvg) {
-    getToolboxElement(workspace)?.focus();
-  }
-
-  /**
-   * Sets the navigation state to toolbox and selects the first category in the
-   * toolbox. No-op if a toolbox does not exist on the given workspace.
-   *
-   * @param workspace The workspace to get the toolbox on.
-   */
-  handleFocusToolbox(workspace: Blockly.WorkspaceSvg) {
-    const toolbox = workspace.getToolbox();
-    if (!toolbox) {
-      return;
-    }
-    this.setState(workspace, Constants.STATE.TOOLBOX);
-
-    if (!toolbox.getSelectedItem() && toolbox instanceof Blockly.Toolbox) {
-      // Find the first item that is selectable.
-      const toolboxItems = toolbox.getToolboxItems();
-      for (let i = 0, toolboxItem; (toolboxItem = toolboxItems[i]); i++) {
-        if (toolboxItem.isSelectable()) {
-          toolbox.selectItemByPosition(i);
-          break;
-        }
-      }
-    }
-  }
-
-  /**
-   * Clears the navigation state and closes the flyout if `allowClose` is true
-   * and a gesture is not in progress.
-   *
-   * @param workspace The workspace the flyout is on.
-   * @param closeFlyout True to close the flyout, false otherwise.
-   */
-  handleBlurToolbox(workspace: Blockly.WorkspaceSvg, closeFlyout: boolean) {
-    this.setState(workspace, Constants.STATE.NOWHERE);
-    if (closeFlyout) {
-      workspace.hideChaff();
-    }
-  }
-
-  /**
-   * Sets browser focus to the flyout (if any).
-   *
-   * @param workspace The workspace with the flyout.
-   */
-  focusFlyout(workspace: Blockly.WorkspaceSvg) {
-    getFlyoutElement(workspace)?.focus();
-  }
-
-  /**
-   * Sets the navigation state to flyout and moves the cursor to the first
-   * block or button in the flyout. We disable tabbing to the toolbox while
-   * the flyout has focus as we use left/right for that.
-   *
-   * @param workspace The workspace the flyout is on.
-   */
-  handleFocusFlyout(workspace: Blockly.WorkspaceSvg) {
-    // Note this can happen when the flyout was already focussed as regrettably
-    // a click on the flyout calls markFocused() on the workspace SVG and the
-    // focus is then redirected back to the flyout.
-
-    this.setState(workspace, Constants.STATE.FLYOUT);
-    this.getFlyoutCursor(workspace)?.draw();
-
-    // This doesn't identify a click on the scrollbars which will unfortunately
-    // default the cursor if the flyout didn't already have focus.
-    if (!Blockly.Gesture.inProgress()) {
-      this.defaultFlyoutCursorIfNeeded(workspace);
-    }
-  }
-
-  /**
-   * Clears the navigation state and closes the flyout if `allowClose` is true
-   * and a gesture is not in progress.
-   *
-   * @param workspace The workspace the flyout is on.
-   * @param closeFlyout True to close the flyout, false otherwise.
-   */
-  handleBlurFlyout(workspace: Blockly.WorkspaceSvg, closeFlyout: boolean) {
-    this.setState(workspace, Constants.STATE.NOWHERE);
-    if (closeFlyout) {
-      workspace.hideChaff();
-    }
-    this.getFlyoutCursor(workspace)?.hide();
   }
 
   /**
@@ -576,34 +305,31 @@ export class Navigation {
     prefer: 'first' | 'last' = 'first',
   ) {
     const flyout = workspace.getFlyout();
-    if (!flyout) return;
+    if (!flyout) return false;
     const flyoutCursor = this.getFlyoutCursor(workspace);
-    if (!flyoutCursor) return;
+    if (!flyoutCursor) return false;
 
     const curNode = flyoutCursor.getCurNode();
-    if (curNode && !this.isFlyoutItemDisposed(curNode)) return false;
+    const sourceBlock = flyoutCursor.getSourceBlock();
+    // If the current node is a child of the flyout, nothing needs to be done.
+    if (
+      curNode &&
+      curNode !== flyout.getWorkspace() &&
+      curNode.getFocusableTree() === flyout.getWorkspace() &&
+      !this.isFlyoutItemDisposed(curNode, sourceBlock)
+    ) {
+      return false;
+    }
 
     const flyoutContents = flyout.getContents();
     const defaultFlyoutItem =
       prefer === 'first'
         ? flyoutContents[0]
         : flyoutContents[flyoutContents.length - 1];
-    if (!defaultFlyoutItem) return;
+    if (!defaultFlyoutItem) return false;
     const defaultFlyoutItemElement = defaultFlyoutItem.getElement();
-    if (defaultFlyoutItemElement instanceof Blockly.FlyoutButton) {
-      const astNode = Blockly.ASTNode.createButtonNode(
-        defaultFlyoutItemElement as Blockly.FlyoutButton,
-      );
-      flyoutCursor.setCurNode(astNode);
-      return true;
-    } else if (defaultFlyoutItemElement instanceof Blockly.BlockSvg) {
-      const astNode = Blockly.ASTNode.createStackNode(
-        defaultFlyoutItemElement as Blockly.BlockSvg,
-      );
-      flyoutCursor.setCurNode(astNode);
-      return true;
-    }
-    return false;
+    flyoutCursor.setCurNode(defaultFlyoutItemElement);
+    return true;
   }
 
   /**
@@ -623,31 +349,18 @@ export class Navigation {
   ) {
     const topBlocks = workspace.getTopBlocks(true);
     const cursor = workspace.getCursor();
-    if (!cursor) {
-      return;
-    }
-    const disposed = cursor.getCurNode()?.getSourceBlock()?.disposed;
+    const disposed = cursor.getSourceBlock()?.disposed;
     if (cursor.getCurNode() && !disposed) {
       // Retain the cursor's previous position since it's set, but only if not
       // disposed (which can happen when blocks are reloaded).
       return false;
     }
-    const wsCoordinates = new Blockly.utils.Coordinate(
-      DEFAULT_WS_COORDINATE.x / workspace.scale,
-      DEFAULT_WS_COORDINATE.y / workspace.scale,
-    );
     if (topBlocks.length > 0) {
       cursor.setCurNode(
-        Blockly.ASTNode.createTopNode(
-          topBlocks[prefer === 'first' ? 0 : topBlocks.length - 1],
-        ),
+        topBlocks[prefer === 'first' ? 0 : topBlocks.length - 1],
       );
     } else {
-      const wsNode = Blockly.ASTNode.createWorkspaceNode(
-        workspace,
-        wsCoordinates,
-      );
-      cursor.setCurNode(wsNode);
+      cursor.setCurNode(workspace);
     }
     return true;
   }
@@ -658,11 +371,11 @@ export class Navigation {
    * @param workspace The main workspace the flyout is on.
    * @returns The flyout's cursor or null if no flyout exists.
    */
-  getFlyoutCursor(workspace: Blockly.WorkspaceSvg): FlyoutCursor | null {
+  getFlyoutCursor(workspace: Blockly.WorkspaceSvg): Blockly.LineCursor | null {
     const flyout = workspace.getFlyout();
     const cursor = flyout ? flyout.getWorkspace().getCursor() : null;
 
-    return cursor as FlyoutCursor;
+    return cursor;
   }
 
   /**
@@ -674,89 +387,131 @@ export class Navigation {
    * @returns True if the key was handled; false if something went
    *     wrong.
    */
-  tryToConnectBlock(
-    stationaryNode: Blockly.ASTNode,
+  findInsertStartPoint(
+    stationaryNode: Blockly.IFocusableNode,
     movingBlock: Blockly.BlockSvg,
-  ): boolean {
-    const stationaryType = stationaryNode.getType();
-    const stationaryLoc = stationaryNode.getLocation();
+  ): Blockly.RenderedConnection | null {
+    const movingHasOutput = !!movingBlock.outputConnection;
 
-    if (stationaryNode.isConnection()) {
-      // Connect the moving block to the stationary connection using
-      // the most plausible connection on the moving block.
-      const stationaryAsConnection =
-        stationaryLoc as Blockly.RenderedConnection;
-      return this.insertBlock(movingBlock, stationaryAsConnection);
-    } else if (stationaryType === Blockly.ASTNode.types.WORKSPACE) {
-      return this.moveBlockToWorkspace(movingBlock, stationaryNode);
-    } else if (stationaryType === Blockly.ASTNode.types.BLOCK) {
-      const stationaryBlock = stationaryLoc as Blockly.BlockSvg;
-
-      // 1. Connect blocks to first compatible input
-      const inputType = movingBlock.outputConnection
-        ? Blockly.inputs.inputTypes.VALUE
-        : Blockly.inputs.inputTypes.STATEMENT;
-      const compatibleInputs = stationaryBlock.inputList.filter(
-        (input) => input.type === inputType,
-      );
-      const input = compatibleInputs.length > 0 ? compatibleInputs[0] : null;
-      let connection = input?.connection;
-      if (connection) {
-        if (inputType === Blockly.inputs.inputTypes.STATEMENT) {
-          while (connection.targetBlock()?.nextConnection) {
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            connection = connection.targetBlock()!.nextConnection!;
-          }
-        }
-        return this.insertBlock(
-          movingBlock,
-          connection as Blockly.RenderedConnection,
-        );
+    if (stationaryNode instanceof Blockly.Field) {
+      // Can't connect a block to a field, so try going up to the source block.
+      const sourceBlock = stationaryNode.getSourceBlock() as Blockly.BlockSvg;
+      if (!sourceBlock) return null;
+      return this.findInsertStartPoint(sourceBlock, movingBlock);
+    } else if (stationaryNode instanceof Blockly.RenderedConnection) {
+      // Move to the block if we're trying to insert a statement block into
+      // a value connection.
+      if (
+        !movingHasOutput &&
+        stationaryNode.type === Blockly.ConnectionType.INPUT_VALUE
+      ) {
+        const sourceBlock = stationaryNode.getSourceBlock();
+        if (!sourceBlock) return null;
+        return this.findInsertStartPoint(sourceBlock, movingBlock);
       }
 
-      // 2. Connect statement blocks to next connection.
-      if (stationaryBlock.nextConnection && !movingBlock.outputConnection) {
-        return this.insertBlock(movingBlock, stationaryBlock.nextConnection);
+      // Connect the moving block to the stationary connection using
+      // the most plausible connection on the moving block.
+      return stationaryNode;
+    } else if (stationaryNode instanceof Blockly.WorkspaceSvg) {
+      return null;
+    } else if (stationaryNode instanceof Blockly.BlockSvg) {
+      // 1. Connect blocks to first compatible input
+      const inputType = movingHasOutput
+        ? Blockly.inputs.inputTypes.VALUE
+        : Blockly.inputs.inputTypes.STATEMENT;
+      const compatibleConnections = stationaryNode.inputList
+        .filter((input) => input.type === inputType)
+        .map((input) => input.connection);
+      for (const connection of compatibleConnections) {
+        let targetConnection: Blockly.Connection | null | undefined =
+          connection;
+        if (inputType === Blockly.inputs.inputTypes.STATEMENT) {
+          while (targetConnection?.targetBlock()?.nextConnection) {
+            targetConnection = targetConnection?.targetBlock()?.nextConnection;
+          }
+        }
+
+        if (
+          targetConnection &&
+          movingBlock.workspace.connectionChecker.canConnect(
+            movingHasOutput
+              ? movingBlock.outputConnection
+              : movingBlock.previousConnection,
+            targetConnection,
+            true,
+            // Since we're connecting programmatically, we don't care how
+            // close the blocks are when determining if they can be connected.
+            Infinity,
+          )
+        ) {
+          return targetConnection as Blockly.RenderedConnection;
+        }
+      }
+
+      // 2. Connect statement blocks to next connection. Only return a next
+      // connection to which the statement block can actually connect; some
+      // may be ineligible because they are e.g. in the middle of an immovable
+      // stack.
+      if (stationaryNode.nextConnection && !movingHasOutput) {
+        let nextConnection: Blockly.RenderedConnection | null =
+          stationaryNode.nextConnection;
+        while (nextConnection) {
+          if (
+            movingBlock.workspace.connectionChecker.canConnect(
+              movingBlock.previousConnection,
+              nextConnection,
+              true,
+              // Since we're connecting programmatically, we don't care how
+              // close the blocks are when determining if they can be connected.
+              Infinity,
+            )
+          ) {
+            return nextConnection;
+          }
+          nextConnection =
+            nextConnection.getSourceBlock().getNextBlock()?.nextConnection ??
+            null;
+        }
       }
 
       // 3. Output connection. This will wrap around or displace.
-      if (stationaryBlock.outputConnection) {
-        return this.insertBlock(movingBlock, stationaryBlock.outputConnection);
+      if (stationaryNode.outputConnection) {
+        // Try to wrap.
+        const target = stationaryNode.outputConnection.targetConnection;
+        if (movingHasOutput && target) {
+          return this.findInsertStartPoint(target, movingBlock);
+        } else if (!movingHasOutput) {
+          // Move to parent if we're trying to insert a statement block.
+          const parent = stationaryNode.getParent();
+          if (!parent) return null;
+          return this.findInsertStartPoint(parent, movingBlock);
+        }
+        return stationaryNode.outputConnection;
       }
     }
-    this.warn(`Unexpected case in tryToConnectBlock ${stationaryType}.`);
-    return false;
+    this.warn(`Unexpected case in findInsertStartPoint ${stationaryNode}.`);
+    return null;
   }
 
   /**
-   * Disconnects the block from its parent and moves it to the position of the
-   * workspace node.
+   * Tries to intelligently connect the blocks or connections
+   * represented by the given nodes, based on node types and locations.
    *
-   * @param block The block to be moved to the workspace.
-   * @param wsNode The workspace node holding the position
-   *     the block will be moved to.
-   * @returns True if the block can be moved to the workspace,
-   *     false otherwise.
+   * @param stationaryNode The first node to connect.
+   * @param movingBlock The block we're moving.
+   * @returns True if the connection was successful, false otherwise.
    */
-  moveBlockToWorkspace(
-    block: Blockly.BlockSvg | null,
-    wsNode: Blockly.ASTNode,
+  tryToConnectBlock(
+    stationaryNode: Blockly.IFocusableNode,
+    movingBlock: Blockly.BlockSvg,
   ): boolean {
-    if (!block) {
-      return false;
-    }
-    if (block.isShadow()) {
-      this.warn('Cannot move a shadow block to the workspace.');
-      return false;
-    }
-    if (block.getParent()) {
-      block.unplug(false);
-    }
-    const workspaceCoordinate = wsNode.getWsCoordinate();
-    if (!workspaceCoordinate) return false;
-
-    block.moveTo(workspaceCoordinate);
-    return true;
+    const destConnection = this.findInsertStartPoint(
+      stationaryNode,
+      movingBlock,
+    );
+    if (!destConnection) return false;
+    return this.insertBlock(movingBlock, destConnection);
   }
 
   /**
@@ -1021,10 +776,6 @@ export class Navigation {
       workspace.keyboardAccessibilityMode
     ) {
       workspace.keyboardAccessibilityMode = false;
-      workspace.getCursor()?.hide();
-      if (this.getFlyoutCursor(workspace)) {
-        this.getFlyoutCursor(workspace)?.hide();
-      }
     }
   }
 
@@ -1065,10 +816,12 @@ export class Navigation {
    * @param workspace The active workspace.
    */
   openToolboxOrFlyout(workspace: Blockly.WorkspaceSvg) {
-    if (workspace.getToolbox()) {
-      this.focusToolbox(workspace);
-    } else {
-      this.focusFlyout(workspace);
+    const toolbox = workspace.getToolbox();
+    const flyout = workspace.getFlyout();
+    if (toolbox) {
+      Blockly.getFocusManager().focusTree(toolbox);
+    } else if (flyout) {
+      Blockly.getFocusManager().focusTree(flyout.getWorkspace());
     }
   }
 
@@ -1082,7 +835,7 @@ export class Navigation {
    */
   paste(copyData: Blockly.ICopyData, workspace: Blockly.WorkspaceSvg): boolean {
     // Do this before clipoard.paste due to cursor/focus workaround in getCurNode.
-    const targetNode = workspace.getCursor()?.getCurNode();
+    const targetNode = workspace.getCursor().getCurNode();
 
     Blockly.Events.setGroup(true);
     const block = Blockly.clipboard.paste(
@@ -1111,10 +864,20 @@ export class Navigation {
    * @returns whether keyboard navigation is currently allowed.
    */
   canCurrentlyNavigate(workspace: Blockly.WorkspaceSvg) {
-    return (
-      workspace.keyboardAccessibilityMode &&
-      this.getState(workspace) !== Constants.STATE.NOWHERE
-    );
+    // Only the main/root workspace has the accessibility mode bit set; for
+    // nested workspaces (mutators or flyouts) we need to walk up the tree.
+    // Default to the root workspace if present. Flyouts don't consider
+    // their workspaces to have a root workspace/be a nested child, so fall
+    // back to checking the target workspace's root (`.targetWorkspace` only
+    // exists on flyout workspaces) and then fall back to the target/main
+    // workspace itself.
+    const accessibilityMode = (
+      workspace.getRootWorkspace() ??
+      workspace.targetWorkspace?.getRootWorkspace() ??
+      workspace.targetWorkspace ??
+      workspace
+    ).keyboardAccessibilityMode;
+    return !!accessibilityMode && this.getState() !== Constants.STATE.NOWHERE;
   }
 
   /**
@@ -1127,7 +890,7 @@ export class Navigation {
    * @returns whether keyboard navigation and editing is currently allowed.
    */
   canCurrentlyEdit(workspace: Blockly.WorkspaceSvg) {
-    return this.canCurrentlyNavigate(workspace) && !workspace.options.readOnly;
+    return this.canCurrentlyNavigate(workspace) && !workspace.isReadOnly();
   }
 
   /**

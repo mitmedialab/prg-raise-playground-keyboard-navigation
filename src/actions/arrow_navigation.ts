@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {ASTNode, ShortcutRegistry, utils as BlocklyUtils} from 'blockly/core';
+import {
+  ShortcutRegistry,
+  utils as BlocklyUtils,
+  Field,
+  keyboardNavigationController,
+} from 'blockly/core';
 
-import type {Field, Toolbox, WorkspaceSvg} from 'blockly/core';
+import type {Toolbox, WorkspaceSvg} from 'blockly/core';
 
+import * as Blockly from 'blockly/core';
 import * as Constants from '../constants';
 import type {Navigation} from '../navigation';
 
@@ -32,13 +38,9 @@ export class ArrowNavigation {
     workspace: WorkspaceSvg,
     shortcut: ShortcutRegistry.KeyboardShortcut,
   ): boolean {
-    const cursor = workspace.getCursor();
-    if (!cursor || !cursor.getCurNode()) {
-      return false;
-    }
-    const curNode = cursor.getCurNode();
-    if (curNode?.getType() === ASTNode.types.FIELD) {
-      return (curNode.getLocation() as Field).onShortcut(shortcut);
+    const curNode = workspace.getCursor().getCurNode();
+    if (curNode instanceof Field) {
+      return curNode.onShortcut(shortcut);
     }
     return false;
   }
@@ -47,6 +49,74 @@ export class ArrowNavigation {
    * Adds all arrow key navigation shortcuts to the registry.
    */
   install() {
+    const navigateIn = (
+      workspace: WorkspaceSvg,
+      e: Event,
+      shortcut: ShortcutRegistry.KeyboardShortcut,
+    ): boolean => {
+      const toolbox = workspace.getToolbox() as Toolbox;
+      const flyout = workspace.isFlyout
+        ? workspace.targetWorkspace?.getFlyout()
+        : workspace.getFlyout();
+      let isHandled = false;
+      switch (this.navigation.getState()) {
+        case Constants.STATE.WORKSPACE:
+          isHandled = this.fieldShortcutHandler(workspace, shortcut);
+          if (!isHandled && workspace) {
+            if (
+              !this.navigation.defaultWorkspaceCursorPositionIfNeeded(workspace)
+            ) {
+              workspace.getCursor().in();
+            }
+            isHandled = true;
+          }
+          return isHandled;
+        case Constants.STATE.TOOLBOX:
+          // @ts-expect-error private method
+          isHandled = toolbox && toolbox.selectChild();
+          if (!isHandled && flyout) {
+            this.navigation.defaultFlyoutCursorIfNeeded(workspace);
+          }
+          return true;
+        default:
+          return false;
+      }
+    };
+
+    const navigateOut = (
+      workspace: WorkspaceSvg,
+      e: Event,
+      shortcut: ShortcutRegistry.KeyboardShortcut,
+    ): boolean => {
+      const toolbox = workspace.isFlyout
+        ? workspace.targetWorkspace?.getToolbox()
+        : workspace.getToolbox();
+      let isHandled = false;
+      switch (this.navigation.getState()) {
+        case Constants.STATE.WORKSPACE:
+          isHandled = this.fieldShortcutHandler(workspace, shortcut);
+          if (!isHandled && workspace) {
+            if (
+              !this.navigation.defaultWorkspaceCursorPositionIfNeeded(workspace)
+            ) {
+              workspace.getCursor().out();
+            }
+            isHandled = true;
+          }
+          return isHandled;
+        case Constants.STATE.FLYOUT:
+          if (toolbox) {
+            Blockly.getFocusManager().focusTree(toolbox);
+          }
+          return true;
+        case Constants.STATE.TOOLBOX:
+          // @ts-expect-error private method
+          return toolbox && toolbox.selectParent();
+        default:
+          return false;
+      }
+    };
+
     const shortcuts: {
       [name: string]: ShortcutRegistry.KeyboardShortcut;
     } = {
@@ -56,34 +126,10 @@ export class ArrowNavigation {
         preconditionFn: (workspace) =>
           this.navigation.canCurrentlyNavigate(workspace),
         callback: (workspace, e, shortcut) => {
-          const toolbox = workspace.getToolbox() as Toolbox;
-          let isHandled = false;
-          switch (this.navigation.getState(workspace)) {
-            case Constants.STATE.WORKSPACE:
-              isHandled = this.fieldShortcutHandler(workspace, shortcut);
-              if (!isHandled && workspace) {
-                if (
-                  !this.navigation.defaultWorkspaceCursorPositionIfNeeded(
-                    workspace,
-                  )
-                ) {
-                  workspace.getCursor()?.in();
-                }
-                isHandled = true;
-              }
-              return isHandled;
-            case Constants.STATE.TOOLBOX:
-              isHandled =
-                toolbox && typeof toolbox.onShortcut === 'function'
-                  ? toolbox.onShortcut(shortcut)
-                  : false;
-              if (!isHandled) {
-                this.navigation.focusFlyout(workspace);
-              }
-              return true;
-            default:
-              return false;
-          }
+          keyboardNavigationController.setIsActive(true);
+          return workspace.RTL
+            ? navigateOut(workspace, e, shortcut)
+            : navigateIn(workspace, e, shortcut);
         },
         keyCodes: [KeyCodes.RIGHT],
       },
@@ -94,32 +140,10 @@ export class ArrowNavigation {
         preconditionFn: (workspace) =>
           this.navigation.canCurrentlyNavigate(workspace),
         callback: (workspace, e, shortcut) => {
-          const toolbox = workspace.getToolbox() as Toolbox;
-          let isHandled = false;
-          switch (this.navigation.getState(workspace)) {
-            case Constants.STATE.WORKSPACE:
-              isHandled = this.fieldShortcutHandler(workspace, shortcut);
-              if (!isHandled && workspace) {
-                if (
-                  !this.navigation.defaultWorkspaceCursorPositionIfNeeded(
-                    workspace,
-                  )
-                ) {
-                  workspace.getCursor()?.out();
-                }
-                isHandled = true;
-              }
-              return isHandled;
-            case Constants.STATE.FLYOUT:
-              this.navigation.focusToolbox(workspace);
-              return true;
-            case Constants.STATE.TOOLBOX:
-              return toolbox && typeof toolbox.onShortcut === 'function'
-                ? toolbox.onShortcut(shortcut)
-                : false;
-            default:
-              return false;
-          }
+          keyboardNavigationController.setIsActive(true);
+          return workspace.RTL
+            ? navigateIn(workspace, e, shortcut)
+            : navigateOut(workspace, e, shortcut);
         },
         keyCodes: [KeyCodes.LEFT],
       },
@@ -130,10 +154,9 @@ export class ArrowNavigation {
         preconditionFn: (workspace) =>
           this.navigation.canCurrentlyNavigate(workspace),
         callback: (workspace, e, shortcut) => {
-          const toolbox = workspace.getToolbox() as Toolbox;
-          const flyout = workspace.getFlyout();
+          keyboardNavigationController.setIsActive(true);
           let isHandled = false;
-          switch (this.navigation.getState(workspace)) {
+          switch (this.navigation.getState()) {
             case Constants.STATE.WORKSPACE:
               isHandled = this.fieldShortcutHandler(workspace, shortcut);
               if (!isHandled && workspace) {
@@ -142,24 +165,45 @@ export class ArrowNavigation {
                     workspace,
                   )
                 ) {
-                  workspace.getCursor()?.next();
+                  workspace.getCursor().next();
                 }
                 isHandled = true;
               }
               return isHandled;
             case Constants.STATE.FLYOUT:
               isHandled = this.fieldShortcutHandler(workspace, shortcut);
-              if (!isHandled && flyout) {
-                if (!this.navigation.defaultFlyoutCursorIfNeeded(workspace)) {
-                  flyout.getWorkspace()?.getCursor()?.next();
+              if (!isHandled && workspace.targetWorkspace) {
+                if (
+                  !this.navigation.defaultFlyoutCursorIfNeeded(
+                    workspace.targetWorkspace,
+                  )
+                ) {
+                  workspace.getCursor().next();
                 }
                 isHandled = true;
               }
               return isHandled;
-            case Constants.STATE.TOOLBOX:
-              return toolbox && typeof toolbox.onShortcut === 'function'
-                ? toolbox.onShortcut(shortcut)
-                : false;
+            case Constants.STATE.TOOLBOX: {
+              const toolbox = workspace.getToolbox() as Toolbox;
+              if (toolbox) {
+                if (!toolbox.getSelectedItem()) {
+                  const firstItem =
+                    toolbox
+                      .getToolboxItems()
+                      .find((item) => item.isSelectable()) ?? null;
+                  toolbox.setSelectedItem(firstItem);
+                  isHandled = true;
+                } else {
+                  // @ts-expect-error private method
+                  isHandled = toolbox.selectNext();
+                }
+                const selectedItem = toolbox.getSelectedItem();
+                if (selectedItem) {
+                  Blockly.getFocusManager().focusNode(selectedItem);
+                }
+              }
+              return isHandled;
+            }
             default:
               return false;
           }
@@ -172,10 +216,9 @@ export class ArrowNavigation {
         preconditionFn: (workspace) =>
           this.navigation.canCurrentlyNavigate(workspace),
         callback: (workspace, e, shortcut) => {
-          const flyout = workspace.getFlyout();
-          const toolbox = workspace.getToolbox() as Toolbox;
+          keyboardNavigationController.setIsActive(true);
           let isHandled = false;
-          switch (this.navigation.getState(workspace)) {
+          switch (this.navigation.getState()) {
             case Constants.STATE.WORKSPACE:
               isHandled = this.fieldShortcutHandler(workspace, shortcut);
               if (!isHandled) {
@@ -185,29 +228,37 @@ export class ArrowNavigation {
                     'last',
                   )
                 ) {
-                  workspace.getCursor()?.prev();
+                  workspace.getCursor().prev();
                 }
                 isHandled = true;
               }
               return isHandled;
             case Constants.STATE.FLYOUT:
               isHandled = this.fieldShortcutHandler(workspace, shortcut);
-              if (!isHandled && flyout) {
+              if (!isHandled && workspace.targetWorkspace) {
                 if (
                   !this.navigation.defaultFlyoutCursorIfNeeded(
-                    workspace,
+                    workspace.targetWorkspace,
                     'last',
                   )
                 ) {
-                  flyout.getWorkspace()?.getCursor()?.prev();
+                  workspace.getCursor().prev();
                 }
                 isHandled = true;
               }
               return isHandled;
-            case Constants.STATE.TOOLBOX:
-              return toolbox && typeof toolbox.onShortcut === 'function'
-                ? toolbox.onShortcut(shortcut)
-                : false;
+            case Constants.STATE.TOOLBOX: {
+              const toolbox = workspace.getToolbox() as Toolbox;
+              if (toolbox) {
+                // @ts-expect-error private method
+                isHandled = toolbox.selectPrevious();
+                const selectedItem = toolbox.getSelectedItem();
+                if (selectedItem) {
+                  Blockly.getFocusManager().focusNode(selectedItem);
+                }
+              }
+              return isHandled;
+            }
             default:
               return false;
           }

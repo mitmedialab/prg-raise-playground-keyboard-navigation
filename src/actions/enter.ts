@@ -5,24 +5,32 @@
  */
 
 import {
-  ASTNode,
   Events,
   ShortcutRegistry,
   utils as BlocklyUtils,
-  dialog,
+  BlockSvg,
+  FlyoutButton,
+  RenderedConnection,
+  WorkspaceSvg,
+  Field,
+  icons,
+  FocusableTreeTraverser,
+  renderManagement,
+  comments,
+  getFocusManager,
+  hasBubble,
 } from 'blockly/core';
 
-import type {
-  Block,
-  BlockSvg,
-  Field,
-  FlyoutButton,
-  WorkspaceSvg,
-} from 'blockly/core';
+import type {Block} from 'blockly/core';
 
 import * as Constants from '../constants';
 import type {Navigation} from '../navigation';
-import {Mover} from './mover';
+import {Mover, MoveType} from './mover';
+import {
+  showConstrainedMovementHint,
+  showHelpHint,
+  showUnconstrainedMoveHint,
+} from '../hints';
 
 const KeyCodes = BlocklyUtils.KeyCodes;
 
@@ -48,75 +56,131 @@ export class EnterAction {
      */
     ShortcutRegistry.registry.register({
       name: Constants.SHORTCUT_NAMES.EDIT_OR_CONFIRM,
-      preconditionFn: (workspace) =>
-        this.navigation.canCurrentlyEdit(workspace),
-      callback: (workspace, event) => {
+      preconditionFn: (workspace): boolean => {
+        switch (this.navigation.getState()) {
+          case Constants.STATE.WORKSPACE:
+            return this.shouldHandleEnterForWS(workspace);
+          case Constants.STATE.FLYOUT: {
+            // If we're in the flyout the only supported actions are inserting
+            // blocks or clicking buttons, so don't handle this if the
+            // main workspace is read only.
+            const targetWorkspace = workspace.isFlyout
+              ? workspace.targetWorkspace
+              : workspace;
+            if (!targetWorkspace) return false;
+            return this.navigation.canCurrentlyEdit(targetWorkspace);
+          }
+          default:
+            return false;
+        }
+      },
+      callback: (workspace, event): boolean => {
         event.preventDefault();
+
+        const targetWorkspace = workspace.isFlyout
+          ? workspace.targetWorkspace
+          : workspace;
+        if (!targetWorkspace) return false;
 
         let flyoutCursor;
         let curNode;
-        let nodeType;
 
-        switch (this.navigation.getState(workspace)) {
+        switch (this.navigation.getState()) {
           case Constants.STATE.WORKSPACE:
-            this.handleEnterForWS(workspace);
-            return true;
+            return this.handleEnterForWS(workspace);
           case Constants.STATE.FLYOUT:
-            flyoutCursor = this.navigation.getFlyoutCursor(workspace);
+            flyoutCursor = this.navigation.getFlyoutCursor(targetWorkspace);
             if (!flyoutCursor) {
               return false;
             }
             curNode = flyoutCursor.getCurNode();
-            nodeType = curNode?.getType();
-
-            switch (nodeType) {
-              case ASTNode.types.STACK:
-                this.insertFromFlyout(workspace);
-                break;
-              case ASTNode.types.BUTTON:
-                this.triggerButtonCallback(workspace);
-                break;
+            if (curNode instanceof BlockSvg) {
+              this.insertFromFlyout(targetWorkspace);
+            } else if (curNode instanceof FlyoutButton) {
+              this.triggerButtonCallback(targetWorkspace);
             }
-
             return true;
           default:
             return false;
         }
       },
       keyCodes: [KeyCodes.ENTER, KeyCodes.SPACE],
+      allowCollision: true,
     });
+  }
+
+  /**
+   * Checks if the enter key should do anything for this ws.
+   *
+   * @param workspace The workspace to check.
+   * @returns True if the enter action should be handled.
+   */
+  private shouldHandleEnterForWS(workspace: WorkspaceSvg): boolean {
+    if (!this.navigation.canCurrentlyNavigate(workspace)) return false;
+    if (workspace.isDragging()) return false;
+
+    const curNode = workspace.getCursor().getCurNode();
+    if (!curNode) return false;
+    if (curNode instanceof Field) return curNode.isClickable();
+    if (
+      curNode instanceof RenderedConnection ||
+      curNode instanceof WorkspaceSvg
+    ) {
+      return !workspace.isReadOnly();
+    }
+    // Returning true is sometimes incorrect for icons, but there's no API to check.
+    return (
+      curNode instanceof BlockSvg ||
+      curNode instanceof icons.Icon ||
+      curNode instanceof comments.CommentBarButton ||
+      curNode instanceof comments.RenderedWorkspaceComment
+    );
   }
 
   /**
    * Handles hitting the enter key on the workspace.
    *
    * @param workspace The workspace.
+   * @returns True if the enter was handled, false otherwise.
    */
-  private handleEnterForWS(workspace: WorkspaceSvg) {
+  private handleEnterForWS(workspace: WorkspaceSvg): boolean {
     const cursor = workspace.getCursor();
-    if (!cursor) return;
     const curNode = cursor.getCurNode();
-    if (!curNode) return;
-    const nodeType = curNode.getType();
-    if (nodeType === ASTNode.types.FIELD) {
-      (curNode.getLocation() as Field).showEditor();
-    } else if (nodeType === ASTNode.types.BLOCK) {
-      const block = curNode.getLocation() as Block;
-      if (!this.tryShowFullBlockFieldEditor(block)) {
-        const metaKey = navigator.platform.startsWith('Mac') ? 'Cmd' : 'Ctrl';
-        const canMoveInHint = `Press right arrow to move in or ${metaKey} + Enter for more options`;
-        const genericHint = `Press ${metaKey} + Enter for options`;
-        const hint =
-          curNode.in()?.getSourceBlock() === block
-            ? canMoveInHint
-            : genericHint;
-        dialog.alert(hint);
+    if (!curNode) return false;
+    if (curNode instanceof Field) {
+      curNode.showEditor();
+      return true;
+    } else if (curNode instanceof BlockSvg) {
+      if (!this.tryShowFullBlockFieldEditor(curNode)) {
+        showHelpHint(workspace);
       }
-    } else if (curNode.isConnection() || nodeType === ASTNode.types.WORKSPACE) {
+      return true;
+    } else if (
+      curNode instanceof RenderedConnection ||
+      curNode instanceof WorkspaceSvg
+    ) {
       this.navigation.openToolboxOrFlyout(workspace);
-    } else if (nodeType === ASTNode.types.STACK) {
-      console.warn('Cannot mark a stack.');
+      return true;
+    } else if (curNode instanceof icons.Icon) {
+      // Calling the icon's click handler will trigger its action, generally
+      // opening a bubble of some sort. We then need to wait for the bubble to
+      // appear before attempting to navigate into it.
+      curNode.onClick();
+      renderManagement.finishQueuedRenders().then(() => {
+        if (hasBubble(curNode) && curNode.bubbleIsVisible()) {
+          cursor.in();
+        }
+      });
+      return true;
+    } else if (curNode instanceof comments.CommentBarButton) {
+      curNode.performAction();
+      return true;
+    } else if (curNode instanceof comments.RenderedWorkspaceComment) {
+      curNode.setCollapsed(false);
+      getFocusManager().focusNode(curNode.getEditorFocusableNode());
+      return true;
     }
+    return false;
   }
 
   /**
@@ -124,36 +188,51 @@ export class EnterAction {
    * Tries to find a connection on the block to connect to the marked
    * location. If no connection has been marked, or there is not a compatible
    * connection then the block is placed on the workspace.
+   * Trigger a toast per session if possible.
    *
    * @param workspace The main workspace. The workspace
    *     the block will be placed on.
    */
   private insertFromFlyout(workspace: WorkspaceSvg) {
     workspace.setResizesEnabled(false);
-    Events.setGroup(true);
+    // Create a new event group or append to the existing group.
+    const existingGroup = Events.getGroup();
+    if (!existingGroup) {
+      Events.setGroup(true);
+    }
 
-    const stationaryNode = this.navigation.getStationaryNode(workspace);
+    // If the workspace has never had focus default the stationary node.
+    const stationaryNode =
+      FocusableTreeTraverser.findFocusedNode(workspace) ??
+      workspace.getRestoredFocusableNode(null);
     const newBlock = this.createNewBlock(workspace);
     if (!newBlock) return;
-    if (stationaryNode) {
-      if (!this.navigation.tryToConnectBlock(stationaryNode, newBlock)) {
-        console.warn(
-          'Something went wrong while inserting a block from the flyout.',
-        );
-      }
-    }
+    const insertStartPoint = stationaryNode
+      ? this.navigation.findInsertStartPoint(stationaryNode, newBlock)
+      : null;
 
     if (workspace.getTopBlocks().includes(newBlock)) {
       this.positionNewTopLevelBlock(workspace, newBlock);
     }
 
-    Events.setGroup(false);
     workspace.setResizesEnabled(true);
 
-    this.navigation.focusWorkspace(workspace);
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    workspace.getCursor()?.setCurNode(ASTNode.createBlockNode(newBlock)!);
-    //this.mover.startMove(workspace);
+    this.mover.startMove(
+      workspace,
+      newBlock,
+      MoveType.Insert,
+      insertStartPoint,
+    );
+
+    const isStartBlock =
+      !newBlock.outputConnection &&
+      !newBlock.nextConnection &&
+      !newBlock.previousConnection;
+    if (isStartBlock) {
+      showUnconstrainedMoveHint(workspace, false);
+    } else {
+      showConstrainedMovementHint(workspace);
+    }
   }
 
   /**
@@ -246,24 +325,22 @@ export class EnterAction {
    *     containing a flyout with a button.
    */
   private triggerButtonCallback(workspace: WorkspaceSvg) {
-    const button = this.navigation
-      .getFlyoutCursor(workspace)
-      ?.getCurNode()
-      ?.getLocation() as FlyoutButton | undefined;
-    if (!button) return;
+    const button = this.navigation.getFlyoutCursor(workspace)?.getCurNode();
+    if (!(button instanceof FlyoutButton)) return;
 
     const flyoutButtonCallbacks: Map<string, (p1: FlyoutButton) => void> =
       // @ts-expect-error private field access
       workspace.flyoutButtonCallbacks;
 
-    const info = button.info;
-    if ('callbackkey' in info) {
-      const buttonCallback = flyoutButtonCallbacks.get(info.callbackkey);
-      if (!buttonCallback) {
-        throw new Error('No callback function found for flyout button.');
-      }
-      buttonCallback(button);
+    // TODO: Remove cast once blockly 12.4.0 is the minimum version of Blockly required.
+    // button.callbackKey is private until that version.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const callbackKey = (button as any).callbackKey;
+    const buttonCallback = flyoutButtonCallbacks.get(callbackKey);
+    if (!buttonCallback) {
+      throw new Error('No callback function found for flyout button.');
     }
+    buttonCallback(button);
   }
 
   /**
@@ -303,11 +380,8 @@ export class EnterAction {
       return null;
     }
 
-    const curBlock = this.navigation
-      .getFlyoutCursor(workspace)
-      ?.getCurNode()
-      ?.getLocation() as BlockSvg | undefined;
-    if (!curBlock?.isEnabled()) {
+    const curBlock = this.navigation.getFlyoutCursor(workspace)?.getCurNode();
+    if (!(curBlock instanceof BlockSvg) || !curBlock.isEnabled()) {
       console.warn("Can't insert a disabled block.");
       return null;
     }
